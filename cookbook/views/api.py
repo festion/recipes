@@ -2738,9 +2738,12 @@ class RecipeUrlImportView(APIView):
                     data = "<script type='application/ld+json'>" + json.dumps(data_json) + "</script>"
                 except JSONDecodeError:
                     pass
-                scrape = scrape_html(html=data, org_url='https://urlnotfound.none', supported_only=False)
-                if not url and (found_url := scrape.schema.data.get('url', 'https://urlnotfound.none')):
-                    scrape = scrape_html(html=data, org_url=found_url, supported_only=False)
+                try:
+                    scrape = scrape_html(html=data, org_url='https://urlnotfound.none', supported_only=False)
+                    if not url and (found_url := scrape.schema.data.get('url', 'https://urlnotfound.none')):
+                        scrape = scrape_html(html=data, org_url=found_url, supported_only=False)
+                except NoSchemaFoundInWildMode:
+                    pass
 
             if scrape:
                 response['recipe'] = helper.get_from_scraper(scrape, request)

@@ -84,6 +84,23 @@ def test_url_import_sends_accept_header(u1_s1):
     assert 'Accept' in headers
 
 
+@pytest.mark.parametrize("html", [
+    '<html><body><p>no recipe here</p></body></html>',
+    '<html><head><script type="application/ld+json">{"@type": "WebPage", "name": "x"}</script></head><body></body></html>',
+], ids=['plain-html', 'non-recipe-ld-json'])
+def test_import_data_without_recipe_returns_error(html, u1_s1):
+    # posted page source (bookmarklet / pasted HTML) with no recipe must give the
+    # same 400 "No usable data" as the url branch, not an unhandled 500
+    response = u1_s1.post(
+        reverse(IMPORT_SOURCE_URL),
+        {'url': 'https://example.com/page', 'data': html},
+        content_type='application/json',
+    )
+    assert response.status_code == 400
+    data = json.loads(response.content)
+    assert data['error'] is True
+
+
 @pytest.mark.parametrize("arg", RECIPES, ids=[x['file'][0] for x in RECIPES])
 def test_recipe_import(arg, u1_s1):
     url = arg['url']
