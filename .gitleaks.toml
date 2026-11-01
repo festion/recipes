@@ -1,0 +1,652 @@
+# Shared gitleaks config for the homelab monorepo.
+#
+# Companion to: operations/docs/plans/2026-05-08-monorepo-security-remediation.md
+# Author: Task 22 (Vikunja #1073).
+#
+# Each repo's `.gitleaks.toml` is a verbatim copy of this file.
+#
+# TO UPDATE CENTRALLY: edit this file and merge. The fan-out is AUTOMATED as of
+# ops #2958 — homelab-iac's weekly `gitleaks-fleet-sync-watch.py` surveys every
+# gated repo and opens a sync PR on each one that has fallen behind. It opens
+# PRs and merges nothing, so the review gate is unchanged, and it skips a repo
+# that already has one open, so an unmerged PR is not reopened weekly.
+#
+# Do NOT hand-copy this file into a repo. `sync_gitleaks_fleet.py` performs a
+# MERGE, not a copy: repo-local allowlist entries (ESPHome's CI dummy key,
+# gw4-config-tool's cert fixture, four in birdnet-gone) are preserved with their
+# comments. A `cp` deletes them, and the symptom is that repo's CI going red on
+# a known-safe fixture — which is the pressure that gets a gate disabled.
+#
+# Until ops #2958 the fan-out was manual and it decayed twice in three days:
+# ops #2881 fixed two rules here and every copy kept the gap; ops #2874 moved
+# the anthropic floor and 23 of 32 repos were still blind the next morning.
+# A stale detector fails in the reassuring direction — gitleaks exits 0, CI is
+# green, and "no leaks found" means "none of the kinds this copy still knows
+# about". That is why the fan-out is scheduled rather than remembered.
+#
+# Rule shapes are tuned to the literals found in the 2026-05-08 audit:
+#   - HA long-lived JWTs (eyJ... with iss/iat/exp claims)
+#   - Proxmox / PBS API tokens (`PVEAPIToken=…`, `PBSAPIToken=…`)
+#   - NetBox 40-char hex tokens
+#   - Pushover app/user tokens (30-char alnum)
+#   - TrueNAS API keys (numeric-id-prefixed: `<id>-<base64ish>`)
+#   - generic JWT shape, PEM private keys, AWS keys
+
+title = "Homelab monorepo gitleaks config"
+
+[extend]
+# Pull in gitleaks' upstream defaults (covers AWS, GCP, Stripe, etc.).
+useDefault = true
+
+# ---------------------------------------------------------------------------
+# Custom rules
+# ---------------------------------------------------------------------------
+#
+# ⚠ EVERY RULE BELOW DECLARES `secretGroup = 1`, AND ITS SOLE CAPTURING GROUP IS
+#   THE CREDENTIAL VALUE. Every other group is `(?:...)`. Load-bearing, not style
+#   -- keep it that way when adding a rule. The truenas-api-key rule below
+#   carries the full incident write-up; this is the fleet-wide statement.
+#
+#   gitleaks reports capture group 1 as a finding's secret. In an anchored rule
+#   group 1 is the ANCHOR, so the reported secret was never the credential.
+#   Measured before the fix (ops #2875), one sample per rule:
+#
+#       netbox-api-token      secret = 'netbox_api_token'    <- the field name
+#       pushover-app-token    secret = 'pushover_api_token'  <- the field name
+#       generic-bearer-token  secret = 'Bearer'              <- a keyword
+#       private-key-pem       secret = 'RSA '                <- the algorithm
+#
+#   Four rules reported a constant string as the secret. That is a correctness
+#   bug on its own, and it is what made the inherited default allowlist test
+#   field names instead of credentials.
+#
+#   ⚠ THE TRADE-OFF SPANS FIVE RULES, NOT JUST TRUENAS. secretGroup moves the
+#     stopword test onto the credential. Shape-preserving sweep, every value at
+#     its rule's required length and charset:
+#
+#                             ^true      false(mid)   null$(end)
+#       ha-long-lived-token   fires      SUPPRESSED   SUPPRESSED
+#       anthropic-api-key     fires      SUPPRESSED   SUPPRESSED
+#       truenas-api-key       fires      SUPPRESSED   SUPPRESSED
+#       pushover-app-token    fires      SUPPRESSED   SUPPRESSED
+#       netbox-api-token      fires      fires        fires
+#       generic-bearer-token  SUPPRESSED SUPPRESSED   SUPPRESSED
+#
+#     `^true` bites only generic-bearer -- the others are digit- or
+#     fixed-prefix-led (eyJ, sk-ant-, 1-, [aug]). The UNANCHORED `false` and the
+#     end-anchored `null$` bite five of six; netbox escapes only because 40-hex
+#     cannot spell either word. Shipped deliberately: this MOVES a likely
+#     trigger (a human-chosen anchor word) to an unlikely one (a random
+#     substring in a credential, order 1e-7).
+#
+# ---------------------------------------------------------------------------
+
+[[rules]]
+id = "ha-long-lived-token"
+description = "Home Assistant long-lived access token (JWT with iss claim)"
+# JWTs are header.payload.signature, all base64url. The HA-specific tells are
+# `iss`, `iat`, `exp` claims after a permissive header. Keep the regex narrow
+# enough that arbitrary base64 blobs don't trip it.
+# FLOOR: {10,}/{40,}/{20,} admit JWT segments shorter than those bounds; a
+#   token that short is not a valid HA long-lived JWT. Short secrets are
+#   covered by parse-and-strip, not by this threshold.
+regex = '''(eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{20,})'''
+secretGroup = 1
+keywords = ["eyJ"]
+
+[[rules]]
+id = "proxmox-pve-api-token"
+description = "Proxmox VE API token (`PVEAPIToken=user@realm!tokenid=uuid`)"
+# Token format: PVEAPIToken=user@realm!tokenid=<uuid-secret>
+regex = '''PVEAPIToken=[A-Za-z0-9._@-]+![A-Za-z0-9._-]+=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'''
+secretGroup = 1
+keywords = ["PVEAPIToken="]
+
+[[rules]]
+id = "pbs-api-token"
+description = "Proxmox Backup Server API token (`PBSAPIToken=user@realm!tokenid:uuid`)"
+# PBS uses `:` as the separator between tokenid and secret (PVE uses `=`).
+regex = '''PBSAPIToken=[A-Za-z0-9._@-]+![A-Za-z0-9._-]+:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'''
+secretGroup = 1
+keywords = ["PBSAPIToken="]
+
+[[rules]]
+id = "pbs-token-id-with-uuid-secret"
+description = "PBS token id with adjacent UUID secret (`monitor@pbs!name:uuid` shape)"
+# Catches the bare-token shape that appeared in proxmox-agent docs / configs:
+#   monitor@pbs!agent:8a14ef79-1a2b-4c5d-...
+# Matches @pbs! plus a UUID v4 within ~80 chars.
+#
+# ⚠ THE SEPARATOR CLASS IS `["'\s:=]+`, NOT `[:= ]\s*`. This rule and its @pve!
+#   twin below carried the latter until 2026-08-14 (ops #2881), and `[:= ]`
+#   matches EXACTLY ONE character while `\s*` then matches whitespace only. So
+#   a single space BEFORE the `=` broke the match: the class ate the space,
+#   `\s*` matched empty, and the engine needed a hex digit where it found `=`.
+#
+#   Measured, one variable (the separator), five values, both realms:
+#
+#       " = "   SILENT      <- ordinary YAML/TOML/ini/shell spacing
+#       "="     fires
+#       ": "    fires
+#       ":"     fires
+#       " "     fires
+#
+#   Four of five fired and the two realms agreed exactly, which is what
+#   established this as the regex rather than a broken harness. `key = value`
+#   is the single most common way these get written down, and it was the one
+#   shape that got through.
+#
+#   `["'\s:=]+` is not a new invention here -- it is the idiom netbox-api-token,
+#   pushover-app-token, truenas-api-key and generic-bearer-token already use in
+#   this same file, which is why none of them had this gap. This change brings
+#   these two rules onto it and widens NOTHING else: the `@pbs!`/`@pve!` prefix
+#   is still required, so a bare UUID still does not match (negative control).
+regex = '''[A-Za-z0-9._-]+@pbs![A-Za-z0-9._-]+["'\s:=]+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'''
+secretGroup = 1
+keywords = ["@pbs!"]
+
+[[rules]]
+id = "pve-token-id-with-uuid-secret"
+description = "PVE token id with adjacent UUID secret (`api@pve!homepage=uuid` shape)"
+# Separator class: see the ops #2881 note on the @pbs! twin above. `[:= ]\s*`
+# matched exactly one character and so missed `root@pve!ci = <uuid>` entirely.
+regex = '''[A-Za-z0-9._-]+@pve![A-Za-z0-9._-]+["'\s:=]+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})'''
+secretGroup = 1
+keywords = ["@pve!"]
+
+# ops #2876 — the name-anchored rules below (netbox, pushover, truenas,
+# generic-bearer) also catch a credential written in a SENTENCE: after the name,
+# either the old separator (quotes, whitespace, `:`, `=`) or a window of at most
+# 40 characters ON THE SAME LINE that ends in one of those (or a backtick). Not `(`: a dotted JSON path in
+# parentheses after "personal access token" matched through it (dotfiles, 2026-10-20).
+# Before this, "the netbox api token is <value>" matched nothing (1 of 6 contexts).
+# Proximity is what keeps it quiet. Measured with real gitleaks over every local
+# fleet checkout on 2026-10-20: 0 new findings in tracked files (14 in gitignored
+# .mypy_cache files, which no CI or pre-commit scan reads). Spaced names
+# ("netbox api token") and `pushover_app_token` / `pushover_user_key` now match.
+[[rules]]
+id = "netbox-api-token"
+description = "NetBox API token (40 hex chars, often after `Token ` or in a config field)"
+# NetBox tokens are 40 lowercase-hex. Require an anchor word to keep noise low.
+regex = '''(?i)(?:netbox[_\s-]?(?:api[_\s-]?)?token|netbox.*authorization)(?:["'\s:=]+|[^\n]{0,40}?["' \t:=`])([a-f0-9]{40})\b'''
+secretGroup = 1
+keywords = ["netbox"]
+
+[[rules]]
+id = "pushover-app-token"
+description = "Pushover application token (30-char alnum, prefixed with `a`)"
+# Pushover app tokens start with 'a' and are 30 chars total. User keys start
+# with 'u' and are also 30 chars. Anchor on the keyword to avoid noise.
+regex = '''(?i)(?:pushover[_\s-]?(?:(?:api|app|user)[_\s-]?)?(?:token|key))(?:["'\s:=]+|[^\n]{0,40}?["' \t:=`])([aug][a-zA-Z0-9]{29})\b'''
+secretGroup = 1
+keywords = ["pushover"]
+
+[[rules]]
+id = "truenas-api-key"
+description = "TrueNAS API key (id-prefixed: `<n>-<60+ alnum>`)"
+# Format: `<numeric_id>-<base64ish-60-chars>`. Anchor on context so we don't
+# false-positive on every dashed identifier.
+#
+# ⚠ secretGroup = 1 IS LOAD-BEARING, NOT A TIDY-UP.
+#
+# gitleaks reports CAPTURE GROUP 1 as a finding's secret. Without secretGroup,
+# group 1 here was the anchor alternation -- so the reported "secret" was the
+# literal string `truenas_api_key`, never the credential. gitleaks' inherited
+# default allowlist then tested THAT. Its boolean-literal entry is, verbatim:
+#     (?i)^true|false|null$
+# Alternation binds loosest, so this parses as (?i) (^true) | (false) | (null$)
+# -- NOT the ^(true|false|null)$ its author intended. Three alternatives, three
+# different anchorings. `truenas_api_key` starts with "true", hits ^true, and is
+# suppressed; `HOMEPAGE_VAR_TRUENAS_KEY` starts with "HOMEPAGE" and is not.
+# Verified 2026-08-14 (ops #2875) by reading the pattern out of the 8.21.2 binary
+# and confirming 6/6 against prediction with a controlled-secret probe.
+#
+# Two earlier explanations of this are FALSIFIED; do not reinstate them. It is
+# not "the secret contains `true`" (that holds only for `false`, which really is
+# unanchored), and it is not case-sensitive ((?i) spans the whole pattern).
+#
+# The exposure was not uniform: a HIGH-entropy key still got caught by the
+# built-in `generic-api-key` (mislabelled, but caught), while a LOW-entropy one
+# was detected by NOTHING AT ALL -- generic-api-key is entropy-gated. So the
+# real hole was low-entropy TrueNAS keys behind a lowercase anchor.
+#
+# TRADE-OFF, stated because it is invisible afterwards: secretGroup does not
+# remove this class of risk, it MOVES it. The allowlist now tests the credential
+# instead of the field name. Here that is strictly better -- an anchor is a
+# human-chosen word, exactly what a stopword list matches, which is why this rule
+# was 100% dead rather than unlucky; a value is random, so `false` anywhere or a
+# trailing `null` costs order 1e-7. `^true` cannot reach this rule's value at all
+# (it is digit-led). A likely trigger traded for an unlikely one.
+# FLOOR: {60,} admits a TrueNAS key body shorter than 60 chars. The 60 is this
+#   rule's own documented format (`<n>-<60+ alnum>`, description above); it is
+#   not re-measured here. Short secrets are covered by parse-and-strip.
+regex = '''(?i)(?:truenas[_\s-]?(?:api[_\s-]?)?key|HOMEPAGE_VAR_TRUENAS_KEY)(?:["'\s:=]+|[^\n]{0,40}?["' \t:=`])([0-9]+-[A-Za-z0-9]{60,})\b'''
+secretGroup = 1
+keywords = ["truenas", "HOMEPAGE_VAR_TRUENAS_KEY"]
+
+[[rules]]
+id = "private-key-pem"
+description = "Private key PEM block (RSA, EC, OpenSSH, generic)"
+regex = '''(-----BEGIN (?:(?:RSA|EC|DSA|OPENSSH|PGP) )?PRIVATE KEY(?: BLOCK)?-----)'''
+secretGroup = 1
+keywords = ["BEGIN", "PRIVATE KEY"]
+
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key (`sk-ant-api03-…` and similar version prefixes)"
+# Format: `sk-ant-api<N>-` then ~95 chars base64url. Self-anchored — no
+# keyword needed; the prefix is unique enough not to false-positive.
+#
+# ⚠ THE FLOOR IS 20, NOT 90 (ops #2874). The 90 was a 5-character margin under an
+#   approximate "~95", and it was buying nothing — measured, not argued:
+#
+#   1. THERE IS NO BACKSTOP, AND NOT MERELY BY ABSENCE. gitleaks 8.21.2 ships no
+#      Anthropic rule at all (two instruments: `strings` over the binary finds no
+#      sk-ant/anthropic against four built-in rule ids that ARE visible that way;
+#      and a defaults-only scan misses a well-formed over-length key while
+#      flagging a PEM control in the same pass). Worse, gitleaks' own
+#      `generic-api-key` — which would otherwise catch a high-entropy blob — is
+#      ACTIVELY SUPPRESSED on every Anthropic key by a default-allowlist stopword:
+#
+#          ab-ant-ef03-<body>   NOTHING      ab-antx-ef03-<body>  fires
+#          ant-cd-ef03-<body>   NOTHING      ab-cd-api03-<body>   fires  ('api' is not it)
+#          ab-xant-ef03-<body>  NOTHING      ab-cd-ef03-<body>    fires
+#
+#      `ant` followed by a non-letter suppresses; followed by a letter it does not.
+#      Every Anthropic key is `sk-ant-api<N>-`, so the `ant` is always followed by
+#      `-`. This rule is therefore not one layer of two — it is the only rule that
+#      CAN match. (Behavioural finding; the stopword list was not read from source.)
+#
+#   2. THE UNDER-FLOOR CLIFF WAS ABSOLUTE. Body length the only variable, fleet
+#      config, five contexts each: 95 fires, 90 fires (floor inclusive), and at
+#      89 NOTHING fires in any context — not this rule, not generic-api-key,
+#      nothing. A key one char short was invisible in every repo at once.
+#
+#   FLOOR: the `{2,}` below is the self-anchoring version-digit run, not a
+#   credential length; `{20,}` / `{90,}` are discussed in this block.
+#   3. LOWERING IT COSTS ZERO. 29 files across 26 repos carry the literal
+#      `sk-ant-api`; matches at floor 90 = 0, at floor 20 = 0, new matches = 0.
+#      All 29 are this pattern's own text inside .gitleaks.toml copies. The reason
+#      is structural: the rule is self-anchored on `sk-ant-api\d{2,}-`, so a lower
+#      LENGTH floor cannot widen it onto anything lacking that prefix.
+#      THE PREFIX BUYS THE PRECISION; THE FLOOR NEVER DID. So the choice was never
+#      recall-vs-noise — it was 5 characters of margin where 75 were free.
+#      (Bound: working trees only, git history not scanned.)
+#
+#   Real-key basis for the "~95": one live key measured at body = 95 via
+#   `infisical-names`, which emits name+len+sha16 only — the value was never read.
+# FLOOR: {20,} admits an Anthropic key body shorter than 20 chars; the rule is
+#   self-anchored on the `sk-ant-api` prefix, so that blind set is not a real
+#   key shape (floor analysis above). Short secrets: parse-and-strip.
+regex = '''(sk-ant-api\d{2,}-[A-Za-z0-9_-]{20,})'''
+secretGroup = 1
+keywords = ["sk-ant-api"]
+
+[[rules]]
+id = "generic-bearer-token"
+description = "Generic bearer / authorization with long secret"
+# Loose match for `Authorization: Bearer <40+ chars>` or `auth_token = <secret>`.
+# `\b` prefix prevents matches on camelCase identifiers like `authenticateApiKey`
+# (no word boundary inside camelCase). Keyword list reduces noise further.
+# FLOOR: {40,} admits every bearer/token value shorter than 40 chars -- app
+#   passwords (16), WiFi PSKs (8), PINs, short API tokens. Those are covered
+#   by parse-and-strip and the name-anchored rules, not by this threshold.
+regex = '''(?i)\b(?:authorization|bearer|api[_\s-]?token|api[_\s-]?key|access[_\s-]?token)(?:["'\s:=]+|[^\n]{0,40}?["' \t:=`])([A-Za-z0-9._\-]{40,})\b'''
+secretGroup = 1
+keywords = ["authorization", "bearer", "api_token", "api-token", "apikey", "api_key", "access_token", "api token", "api key", "access token", "access-token"]
+
+# ---------------------------------------------------------------------------
+# Allowlist
+# ---------------------------------------------------------------------------
+#
+# Per-line opt-out: append `# gitleaks:allow` to a line to silence ALL rules
+# on that single line. Use sparingly and ALWAYS leave a comment explaining why
+# the match is a false positive (e.g. test fixture, public sample, doc example).
+#
+# Path-level opt-outs go below.
+
+[allowlist]
+description = "Global allowlist for known-safe paths and test fixtures"
+
+# Files that cannot meaningfully contain secrets but trigger heuristics.
+# Path regexes match against the file path *relative to the repo root*.
+paths = [
+  '''(?i)(^|/)CHANGELOG(\.md)?$''',
+  # --- repo-local, preserved across template syncs (ops #2830) ---
+  # festion/recipes is an unmodified fork of TandoorRecipes/recipes. These two
+  # upstream files are byte-identical to upstream/develop (checked 2026-11-01):
+  # a k8s install example with placeholder secrets and a generated API client.
+  # Public upstream content, not a festion credential (stormcrow #5161).
+  '''^docs/install/k8s/15-secrets\.yaml$''',
+  '''^vue3/src/authapi/apis/TokensApi\.ts$''',
+  '''(?i)(^|/)LICENSE(\.md|\.txt)?$''',
+  '''(?i)(^|/)\.gitleaks\.toml$''',
+  '''(?i)(^|/)\.gitleaksignore$''',
+  '''(?i)(^|/)go\.sum$''',
+  '''(?i)(^|/)package-lock\.json$''',
+  '''(?i)(^|/)pnpm-lock\.yaml$''',
+  '''(?i)(^|/)yarn\.lock$''',
+  '''(?i)(^|/)poetry\.lock$''',
+  '''(?i)(^|/)Pipfile\.lock$''',
+  '''(?i)(^|/)uv\.lock$''',
+  # The gitleaks template itself contains rule regexes that would self-match.
+  '''(?i)(^|/)templates/gitleaks/''',
+  # Heavy gitignored dirs that bypass-scans (`gitleaks detect --no-git
+  # --source .`) would otherwise traverse. The pre-commit hook never sees
+  # these files (gitignored = never staged), so allowlisting here keeps
+  # ad-hoc baseline scans noise-free without weakening commit-time defense.
+  '''(^|/)\.serena/cache/''',
+  '''(^|/)\.serena/memories/.*/cache/''',
+  '''(^|/)\.storage/''',                       # Home Assistant runtime store
+  '''(^|/)\.esphome/''',                       # ESPHome build cache
+  '''(^|/)esphome/\.esphome/''',
+  '''(^|/)esphome/build/''',
+  '''(^|/)secrets\.yaml$''',                   # local-only HA secrets file (gitignored)
+  '''(^|/)secrets\.yml$''',
+  '''(^|/)\.env$''',                           # gitignored env files; never staged
+  '''(^|/)\.env\.(local|prod|production|development|dev|staging|test)$''',
+  # Template / example env files — inherently full of placeholders.
+  # `.env.example`, `.env.sample`, `.env.template` etc.
+  '''(^|/)\.env\.(template|example|sample|dist|defaults?)$''',
+  # Test directories — fixtures inevitably carry token-shaped strings.
+  '''(^|/)tests?/''',
+  '''(^|/)__tests__/''',
+  '''(^|/)spec/''',
+  # Go puts tests in a FILE SUFFIX beside the code, not in a directory, so the
+  # three entries above never fire in a Go repo (ops #2837). Measured on
+  # birdnet-gone: 9 of its 14 non-bulk findings were Go test fixtures.
+  # TRADE-OFF, stated rather than buried: a real credential committed in a
+  # _test.go file is no longer detected. That is the same trade the directory
+  # entries above already make for every other language.
+  '''_test\.go$''',
+  '''(^|/)\.jest-cache[^/]*/''',                # Jest transform / haste-map caches
+  '''\.pkl$''',                                # pickle binaries (Serena)
+  '''\.log$''',                                # log files
+  '''(^|/)home-assistant\.log''',
+  '''(^|/)dist/''',                            # built artifacts
+  '''(^|/)build/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)__pycache__/''',
+  '''\.pyc$''',
+]
+
+# Stop matches that are obviously placeholder / docs / test fixtures.
+#
+# ⚠ Each entry is matched against the CAPTURED SECRET, not against the line.
+#   No `regexTarget` is set, and gitleaks defaults to the secret. A previous
+#   version of this comment said "the LINE (not just the match)", which is
+#   wrong and is an expensive kind of wrong: an entry written to match the
+#   surrounding line silently suppresses NOTHING -- no error, no warning, the
+#   finding simply keeps firing. Measured 2026-08-12 (ops #2837) while
+#   allowlisting a PEM placeholder: a line-shaped entry left the finding count
+#   unchanged, and only re-scanning revealed it. Anchor entries to the value
+#   (`^...$`), not to its context.
+regexes = [
+  # Test-fixture UUIDs (zero-uuid, all-f-uuid).
+  '''00000000-0000-0000-0000-000000000000''',
+  '''ffffffff-ffff-ffff-ffff-ffffffffffff''',
+  # Common doc placeholders.
+  '''(?i)<your[_-]?(token|key|password|secret)>''',
+  '''(?i)REPLACE[_-]?ME''',
+  '''(?i)example[_-]?(token|key|secret)''',
+  '''xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx''',
+  # Bare upper-snake placeholder words used in shell/curl examples
+  # ("Authorization: Token YOUR_TOKEN" etc.). `_HERE` and `_<vendor>_<TYPE>`
+  # tails are common (YOUR_TOKEN_HERE, YOUR_WIKIJS_TOKEN, YOUR_CLOUDFLARE_KEY).
+  '''\bYOUR_(TOKEN|KEY|API_KEY|API_TOKEN|PASSWORD|SECRET|ACCESS_TOKEN)(_HERE|_VALUE)?\b''',
+  '''\bYOUR_[A-Z][A-Z0-9_]+(_TOKEN|_KEY|_PASSWORD|_SECRET)\b''',
+  '''\b(MY_|FAKE_|DUMMY_|PLACEHOLDER_|TEST_|EXAMPLE_)(TOKEN|KEY|API_KEY|PASSWORD|SECRET)\b''',
+  # Bare `PASSWORD` / `TOKEN` etc. in shell-quoted creds: `-u "root:PASSWORD"`.
+  '''[':"]\s*(USERNAME|USER|PASSWORD|PASS|TOKEN|KEY|SECRET)\s*[':"]''',
+  # The same placeholder UNQUOTED, which the entry above cannot reach: it
+  # requires a quote character on both sides, and `curl -s -u USER:PASS` has
+  # neither. Measured 2026-08-13 on homelab-workspace (ops #2830): 3 findings,
+  # all the 9-byte literal `USER:PASS` in docs. Anchored and enumerated, so it
+  # suppresses only these exact placeholder words.
+  '''^(USER|USERNAME):(PASS|PASSWORD)$''',
+  # Credentials supplied by SHELL COMMAND SUBSTITUTION, which is the pattern
+  # this org's docs are supposed to use: `curl -u "admin:$(infisical-get X)"`.
+  # The captured value contains no credential material at all — it is a
+  # command that fetches one at runtime — so a finding here is a pure false
+  # positive, and one that punishes the correct pattern. Measured 2026-08-13
+  # on homelab-workspace (ops #2830): 6 of its 11 findings were this shape in
+  # docs/network/ADGUARD_DNS_UPDATE_PROCEDURES.md, and a previous triage had
+  # recorded them as "the dead AdGuard credential pair" (ops #2839) — they are
+  # not a credential pair at all.
+  # Fail direction: a literal secret cannot match, because the value must both
+  # begin with `$(` after the colon and end with `)`. Anchored at both ends.
+  '''^[A-Za-z_][A-Za-z0-9_.-]*:\$\([^)]+\)$''',
+  # Truncated-with-ellipsis JWT/Infisical placeholders in docs.
+  # `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...` — canonical HS256 JWT header,
+  # ellipsis-truncated. Same pattern handles other JWT placeholders.
+  '''eyJ[A-Za-z0-9_-]+\.\.\.''',
+  # Unsigned JWTs -- `alg:none` attack fixtures, whose signature segment is
+  # EMPTY. A JWT with no signature cannot authenticate anything, so it is not a
+  # credential whatever its claims say. A properly signed JWT is unaffected and
+  # still reported (verified with a control).
+  #
+  # ANCHORED TO THE CAPTURED VALUE. The previous form ended `\.\s*['"]`, i.e.
+  # it required a quote character that is NOT part of the capture -- gitleaks
+  # matches allowlist regexes against the captured secret, not the line, so it
+  # could never fire. Measured 2026-08-13 on festion/prompter: the entry was
+  # present and the finding was reported anyway; the regex matched the line and
+  # not the secret. That is ops #2837's correction exactly, and the warning
+  # against writing line-shaped entries is 20 lines above this one.
+  '''^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.$''',
+  # Infisical service token placeholder (`st.<uuid>...` or `st.your-token`).
+  '''st\.[0-9a-f-]{0,36}\.\.\.''',
+  '''st\.your-token''',
+  '''st\.<[^>]+>''',
+  # Sequential-digit GitHub PAT placeholder (`ghp_1234567890abcdef...`).
+  '''ghp_1234567890[a-f0-9]+''',
+  # Cloudflare token placeholder shape used by Traefik docs.
+  '''hga_your_api_key_here''',
+  # Documented example curl credentials — weak placeholder passwords in docs
+  # (`curl -u admin:proxmox123`, `root:changeme`). Never real; a genuine
+  # leaked cred would not be one of these throwaway example values. (#1999)
+  '''(?i)\b(admin|root|user):(proxmox123|password|passwd|changeme|example|placeholder|test)\b''',
+  # Stripe-style placeholder API keys in docs (`sk_live_abc123...`,
+  # `sk_test_...`). Real Stripe keys are 24+ random chars with no
+  # `abc123`/ellipsis tell. (#1999)
+  '''sk_(live|test)_[A-Za-z0-9]*\.\.\.''',
+  '''sk_(live|test)_(abc123|xxx|placeholder|example|your)[A-Za-z0-9]*''',
+  # Angle-bracket placeholders standardized in our 2026-05-08 rotation work.
+  # Catches `<OLD_…>`, `<NEW_…>`, `<SEE_INFISICAL:…>`, `<LAKEHOUSE_…>`,
+  # `<WIKI_…>`, etc. — explicit upper-snake placeholder shape.
+  '''<[A-Z][A-Z0-9_]+(:[^>]+)?>''',
+  # Older convention.
+  '''<see Infisical:''',
+]
+
+# ---------------------------------------------------------------------------
+# Markdown-table shapes (ops #3063)
+# ---------------------------------------------------------------------------
+#
+# ⚠ WHY THESE EXIST. A markdown table separates a label from its value with
+#   `|`. Upstream's `generic-api-key` -- the rule carrying every credential with
+#   no distinctive prefix -- requires label and value to be joined by `:` or
+#   `=`. So in a table the label is present, adjacent, and unreachable.
+#   Measured 2026-08-19: one identical 30-char alnum value, 8 line formats, one
+#   scan, this config with `useDefault = true`. Exactly one thing varied.
+#
+#       - api_key: V                            CAUGHT   generic-api-key
+#       api_key=V                               CAUGHT
+#       - api_key: `V`                          CAUGHT
+#       api_key: V              (yaml)          CAUGHT
+#       | api_key: V | note |   (colon INSIDE)  CAUGHT
+#       | api_key | `V` |       (md table)      MISSED
+#       | api_key | V |         (md table)      MISSED
+#       V                       (bare)          MISSED
+#
+#   Put a colon back inside the cell and detection returns -- same value, same
+#   file, same rule. The separator is the whole discriminator.
+#
+#   A markdown table is how a human writes a credential inventory, so this is
+#   the layout of the document you least want leaking. It is also the SECOND
+#   independent instrument found blind to it: ops #2831's hand-written parser
+#   missed "a 23-char punctuation-rich password in a markdown table row" and was
+#   widened from 4 value slots to 98. Two tools, two authors, one blind spot --
+#   a property of the shape, not of anyone's regex.
+#
+#   Scope, stated because it is easy to over-read: `generic-api-key` is an
+#   UPSTREAM DEFAULT. This is not a defect the operations template introduced
+#   and no template sync caused it. These rules are an ADDITION. Prefixed rules
+#   never had the gap -- the `sk-ant-` canary was caught in all three formats
+#   including the table cell, because a prefix rule needs no label. The gap is
+#   scoped to keyword-anchored generic rules, i.e. exactly the class covering
+#   vendor passwords, DB passwords and app passwords.
+#
+# ⚠ THE TWO SUB-SHAPES ARE DIFFERENT PROBLEMS AND ONE RULE CANNOT COVER BOTH.
+#
+#     A  key/value table   `| api_key | V |`                 label ADJACENT
+#     B  column-header     `| Service | User | Password |`    label in HEADER
+#                          `| vw | admin | V |`               value in a row
+#
+#   `| Service | User | Password |` is the single most likely credential-table
+#   layout, and a rule anchored on cell adjacency cannot see it at all -- the
+#   cell left of the value holds `admin`. Both were MISSED before these rules
+#   and both are CAUGHT after. A one-rule fix covers the LESS likely half and
+#   reads as complete, which is why B exists separately.
+#
+# ⚠ BOTH DECLARE `secretGroup = 1` AND GROUP 1 IS THE CREDENTIAL, per the
+#   fleet-wide statement at the top of this file. Asserted, not assumed: both
+#   rules were run against a synthetic canary and the reported `.Secret` digest
+#   compared to the canary's -- equal for both; the same value plus one
+#   character produced a different digest in the same run, so "equal" is a
+#   measurement. (ops #2875 is the incident where four rules reported a constant
+#   field name as the secret.)
+#
+# ⚠ RULE B REPORTS THE HEADER LINE, NOT THE VALUE LINE. It is a multi-line match
+#   and gitleaks anchors a finding at the START of the match. Two operational
+#   consequences: a triage that opens the reported line finds a column header
+#   and no secret; and a per-line `# gitleaks:allow` opt-out must go on the
+#   HEADER row to silence it, not on the row holding the value. Measured -- the
+#   StartLine was the header in all three B cases.
+#
+# ⚠ RULE B CATCHES THE FIRST DATA ROW OF A TABLE, NOT EVERY ROW. gitleaks
+#   reports non-overlapping matches and each match consumes the header it needed
+#   for context, so a 40-row credential table yields ~1 finding, not 40.
+#   Deliberate and sufficient for what this config IS -- a commit gate, where
+#   one finding blocks the commit. It is NOT sufficient as an inventory tool:
+#   do not read its finding count as a credential count.
+#
+# ⚠ `(?m)` IS LOAD-BEARING IN RULE B. Without it Go RE2 makes `$` mean
+#   end-of-TEXT, the trailing anchor can only match at the very end of a file,
+#   and the rule silently never fires. It was drafted that way and the symptom
+#   was a clean scan -- the reassuring direction, as always.
+#
+# ⚠ `^[ \t]{0,3}\|` IS ALSO LOAD-BEARING, AND IT BROKE RULE B ONCE. A real
+#   markdown table row starts with `|` at line start; requiring that is what
+#   stops the rules matching REGEX ALTERNATION (`|~ "requestCSRFToken|X|Y"` in a
+#   LogQL query was a measured fleet false positive -- pipes, no table). But
+#   anchoring rule B at `^` initially forced the keyword into the FIRST cell,
+#   so `| Service | User | Password |` stopped matching and all three B cases
+#   silently went MISSED. Hence `(?:[^\n|]*\|)*?` -- skip whole leading cells.
+#   Keep both, and re-run the case matrix if either is touched.
+#
+# ⚠ THE 16-CHARACTER FLOOR IS THE FAMILY DEFECT RESTATED, NOT SOLVED. The
+#   always-loaded safety rules record that a length floor admits every
+#   credential shorter than it -- a 16-char Gmail app password, an 8-char WiFi
+#   PSK, a PIN. Measured at this floor: a 15-char high-entropy value in a
+#   password cell is MISSED, a 16-char one CAUGHT. The floor buys tolerable
+#   noise in prose-heavy markdown; it does not buy coverage.
+#
+# ⚠ ENTROPY 3.0 IS A NOISE FLOOR, NOT A CLASSIFIER -- AND RAISING IT WOULD COST
+#   MORE THAN IT SAVED. Measured in both directions: a 16-char repeated
+#   character (entropy 0) in a `| password |` cell is SUPPRESSED; a 16-char
+#   random one FIRES; a weak dictionary password (`changeme12345678`, 3.875)
+#   FIRES, deliberately, because a weak real password is still a leaked one.
+#   But the five real fleet false positives measured 3.155 .. 4.127 while
+#   realistic credential shapes measured 3.875 .. 5.459 -- THE RANGES OVERLAP.
+#   A 49-char absolute file path (4.127) out-scores a 40-hex API token (3.971).
+#   So no entropy floor separates them, and any floor high enough to drop the
+#   paths drops real tokens first. That is why the suppression below is
+#   STRUCTURAL rather than another threshold.
+#
+# FALSE-POSITIVE BASIS. Full sweep of 22 gated working trees, seeded
+# known-positive asserted present (a sweep that silently scans nothing produces
+# the same clean zero as a clean fleet -- and gitleaks exits 0 with "no leaks
+# found" on a --source that does not exist, measured; see ops #3065). Before
+# suppression: 5 distinct sites, all false positives, in three classes -- an
+# absolute PATH in the value cell (2), an UPPER_SNAKE env-var NAME in the value
+# cell (2), and the LogQL alternation above (1). Benign tables of versions,
+# IPv4 addresses, ports, prose and 40-char commit SHAs produced zero throughout.
+#
+# THE ALLOWLISTS BELOW ARE PER-RULE, NOT GLOBAL. Both entries would be defensible
+# fleet-wide, and both would silently weaken every other rule if put there -- an
+# UPPER_SNAKE suppression in `[allowlist]` also applies to `generic-api-key`.
+# Scoping them to these two rules bounds the blast radius to the rules whose
+# false positives were actually measured. Each is anchored to the CAPTURED
+# SECRET (`^...$`), per the warning above the global `regexes` list: an entry
+# written against the surrounding line suppresses NOTHING, with no error
+# (ops #2837).
+#
+# Fail direction, stated: a real credential that is exactly an absolute path
+# with a dotted extension, or exactly an UPPER_SNAKE identifier, is now missed
+# by these two rules. A base64 secret can begin with `/`, so the path entry is
+# not impossible to collide with -- it additionally requires every `/`-delimited
+# segment to be non-empty, no `+` or `=` anywhere, and a trailing `.ext`, which
+# a base64 blob satisfies rarely. The UPPER_SNAKE entry requires at least one
+# underscore, which generated tokens (mixed-case or hex) do not have.
+# Both were fire-tested in BOTH directions: each shape FIRES with the allowlist
+# removed and is SUPPRESSED with it present, in the same run, while the true
+# positives above keep firing in both arms.
+
+[[rules]]
+id = "md-table-keyvalue-secret"
+description = "Credential in a two-column markdown table row (`| api_key | <value> |`)"
+# FLOOR: {16,} admits every credential shorter than 16 chars -- WiFi PSKs (8),
+#   PINs, short DB passwords -- and 16 is itself the length of a Gmail app
+#   password, so this rule sits exactly ON the boundary that ops #2833/#2861
+#   were leaked through. Measured at this floor: a 15-char high-entropy value
+#   in a `| password |` cell is MISSED, a 16-char one CAUGHT. The short set is
+#   covered by parse-and-strip and by the entropy scanner over agent-written
+#   trees, NOT by this threshold. Lowering it is not the fix -- it would bury
+#   prose-heavy markdown in noise, and noise is how a gate gets disabled.
+regex = '''(?im)^[ \t]{0,3}\|[ \t]*`?[^|\n`]{0,60}(?:password|passwd|secret|token|api[ _-]?key|apikey|access[ _-]?key|private[ _-]?key|credential|passphrase|psk)[^|\n`]{0,60}`?[ \t]*\|[ \t]*`?([A-Za-z0-9+/=_.\-]{16,})`?[ \t]*\|'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["password", "passwd", "secret", "token", "api key", "api_key", "api-key", "apikey", "access key", "access_key", "private key", "private_key", "credential", "passphrase", "psk"]
+
+[rules.allowlist]
+description = "Measured false-positive shapes for md-table-keyvalue-secret (ops #3063)"
+regexes = [
+  # An absolute path with a dotted extension: `/config/esphome/secrets.yaml`,
+  # `/home/dev/dotfiles/.claude/hooks/block-secrets.py`. Both measured on the
+  # fleet; the label cell said "secrets" and the value cell was a filename.
+  '''^/(?:[A-Za-z0-9_.@-]+/)+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,8}$''',
+  # An UPPER_SNAKE identifier: `VIKUNJA_API_TOKEN`, `DASHBOARD_PASSWORD`.
+  # These come from name-to-name mapping tables (Infisical key -> .env var),
+  # where BOTH cells are variable names and neither is a value.
+  # Keep these examples on LIVE key names. The first one used to name a
+  # credential retired by ops #2953, and homelab-iac's guard forbids that
+  # spelling in ANY tracked file -- so this template carried, into every
+  # synced repo, a name the fleet had agreed to stop using, and reddened an
+  # unrelated sync PR (homelab-iac#783) months later. The retired spelling is
+  # deliberately not quoted here: that guard's own docstring records it being
+  # defeated once by documentation that spelled out the very name it banned.
+  '''^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$''',
+]
+
+[[rules]]
+id = "md-table-column-secret"
+description = "Credential under a secret-named column of a markdown table (value in the last cell)"
+# FLOOR: {16,} admits every credential shorter than 16 chars -- WiFi PSKs (8),
+#   PINs, short DB passwords -- and 16 is itself the length of a Gmail app
+#   password, so this rule sits exactly ON the boundary that ops #2833/#2861
+#   were leaked through. Measured at this floor: a 15-char high-entropy value
+#   in a `| password |` cell is MISSED, a 16-char one CAUGHT. The short set is
+#   covered by parse-and-strip and by the entropy scanner over agent-written
+#   trees, NOT by this threshold. Lowering it is not the fix -- it would bury
+#   prose-heavy markdown in noise, and noise is how a gate gets disabled.
+regex = '''(?im)^[ \t]{0,3}\|(?:[^\n|]*\|)*?[^\n|]{0,60}(?:password|passwd|secret|token|api[ _-]?key|apikey|access[ _-]?key|private[ _-]?key|credential|passphrase|psk)[^\n|]{0,20}\|[ \t]*\n[ \t]{0,3}\|[-: |\t]+\|[ \t]*\n(?:[ \t]{0,3}\|[^\n]*\|[ \t]*\n){0,3}?[ \t]{0,3}\|[^\n]*\|[ \t]*`?([A-Za-z0-9+/=_.\-]{16,})`?[ \t]*\|[ \t]*$'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["password", "passwd", "secret", "token", "api key", "api_key", "api-key", "apikey", "access key", "access_key", "private key", "private_key", "credential", "passphrase", "psk"]
+
+[rules.allowlist]
+description = "Measured false-positive shapes for md-table-column-secret (ops #3063)"
+regexes = [
+  '''^/(?:[A-Za-z0-9_.@-]+/)+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,8}$''',
+  '''^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$''',
+]
