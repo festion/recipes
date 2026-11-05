@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Agent-write-path secret scan (ops #3995). HIGH-PRECISION rules only, ENFORCING.
 
 Agent working notes (.serena/, .claude/learnings*, .claude/**/memory/, Claude
@@ -52,7 +51,7 @@ AGENT_GLOBS = (
 MAX_BYTES = 2_000_000
 
 
-def _glob_re(glob: str) -> "re.Pattern[str]":
+def _glob_re(glob: str) -> re.Pattern[str]:
     out, i = [], 0
     while i < len(glob):
         if glob.startswith("**/", i):
@@ -70,7 +69,7 @@ def _glob_re(glob: str) -> "re.Pattern[str]":
         else:
             out.append(re.escape(glob[i]))
             i += 1
-    return re.compile("^" + "".join(out) + "$", re.I)   # case-insensitive paths
+    return re.compile("^" + "".join(out) + "$", re.IGNORECASE)   # case-insensitive paths
 
 
 _GLOB_RES = [_glob_re(g) for g in AGENT_GLOBS]
@@ -156,7 +155,7 @@ class GitError(RuntimeError):
 
 
 def _git(root, *args):
-    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True)
+    return subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, check=False)
 
 
 def tracked(root):
