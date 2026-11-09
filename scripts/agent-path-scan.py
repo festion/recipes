@@ -83,21 +83,36 @@ def in_agent_path(rel: str) -> bool:
 
 
 RULES = (
+    # FLOOR: values shorter than this rule's minimum length are admitted (not flagged) by this
+    #   rule. Short secrets (PINs, 8-char WiFi PSKs, 16-char app passwords) are covered by the
+    #   nightly note-holders digest watcher (homelab-iac secret-holder-watch), not here.
     ("anthropic-key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
     ("openai-project-key", re.compile(r"\bsk-proj-[A-Za-z0-9_\-]{32,}")),
     ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}|\bgithub_pat_[A-Za-z0-9_]{50,}")),
+    # FLOOR: shorter values are admitted by this rule; the digest watcher covers them (ops #3995).
     ("gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}")),
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")),
+    # FLOOR: values shorter than this rule's minimum length are admitted (not flagged) by this
+    #   rule. Short secrets (PINs, 8-char WiFi PSKs, 16-char app passwords) are covered by the
+    #   nightly note-holders digest watcher (homelab-iac secret-holder-watch), not here.
     ("slack-token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
     ("google-api-key", re.compile(r"\bAIza[A-Za-z0-9_\-]{35}")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{5,}")),
     ("private-key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----")),
     ("openai-legacy", re.compile(r"\bsk-[A-Za-z0-9]{48}\b")),
+    # FLOOR: values shorter than this rule's minimum length are admitted (not flagged) by this
+    #   rule. Short secrets (PINs, 8-char WiFi PSKs, 16-char app passwords) are covered by the
+    #   nightly note-holders digest watcher (homelab-iac secret-holder-watch), not here.
     ("slack-app", re.compile(r"\bxapp-\d-[A-Z0-9]+-\d+-[a-f0-9]{32,}\b")),
     ("kdf-argon2", re.compile(r"\$argon2(?:id|i|d)\$(?:v=\d+\$)?m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]{8,}")),
     ("kdf-bcrypt", re.compile(r"\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{20,}")),
+    # FLOOR: shorter values are admitted by this rule; the digest watcher covers them (ops #3995).
     ("kdf-pbkdf2", re.compile(r"\bpbkdf2[_\-]sha(?:1|256|512)\$[^\s]{8,}|\$pbkdf2-sha(?:1|256|512)\$[^\s]{8,}")),
+    # FLOOR: shorter values are admitted by this rule; the digest watcher covers them (ops #3995).
     ("kdf-crypt", re.compile(r"\$(?:1|5|6|y|7)\$[./A-Za-z0-9,=\-]{0,40}\$[./A-Za-z0-9]{16,}")),
+    # FLOOR: values shorter than this rule's minimum length are admitted (not flagged) by this
+    #   rule. Short secrets (PINs, 8-char WiFi PSKs, 16-char app passwords) are covered by the
+    #   nightly note-holders digest watcher (homelab-iac secret-holder-watch), not here.
     ("kdf-scrypt", re.compile(r"\$scrypt\$[^\s]{8,}|\bscrypt\$[^\s]{16,}")),
     ("kdf-ldap", re.compile(r"\{(?:SSHA|SSHA512|SHA512|PBKDF2[A-Z0-9\-]*|ARGON2)\}[A-Za-z0-9+/=$]{16,}")),
 )
@@ -105,11 +120,17 @@ RULES = (
 # lines (the host after @ must look like a hostname or IP, so prose "a:b@c"
 # does not match). The password may contain '/'.
 _USERINFO = re.compile(
+    # FLOOR: values shorter than this rule's minimum length are admitted (not flagged) by this
+    #   rule. Short secrets (PINs, 8-char WiFi PSKs, 16-char app passwords) are covered by the
+    #   nightly note-holders digest watcher (homelab-iac secret-holder-watch), not here.
     r"(?i)(?:\b[a-z][a-z0-9+.\-]*://[^\s/:@]+:(?P<pw>[^\s@]{1,})@(?P<host>[^\s/:@]*)"
     r"|(?<![\w/:@])[a-z_][\w.\-]*:(?P<pw2>[^\s@:/]{6,})@(?:\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9\-]+(?:\.[a-z0-9\-]+)*))")
 # Only unmistakable placeholders. Real default credentials (admin, root, test)
 # are NOT excused: on an internal host they are working logins.
 _PW_PLACEHOLDER = re.compile(
+    # FLOOR: values shorter than this rule's minimum length are admitted (not flagged) by this
+    #   rule. Short secrets (PINs, 8-char WiFi PSKs, 16-char app passwords) are covered by the
+    #   nightly note-holders digest watcher (homelab-iac secret-holder-watch), not here.
     r"^(?:(?i:password|pass|x+|redacted)|[A-Z][A-Z_]{2,}|\*+|<[^>]*>|\$\{[^}]*\}|\$[A-Z_][A-Z0-9_]*|\{\{.*\}\}|\.+|\u2026)$")
 # Test passwords are excused ONLY on loopback URLs (a local dev/test DSN).
 _LOOPBACK_TEST_PW = re.compile(r"(?i)^(?:test|dev|demo|example|local|temp|postgres)$")
