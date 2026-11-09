@@ -23,6 +23,8 @@
 # ARMS
 #   positives (must be detected, rc 42, RuleID == $EXPECT_RULE, Secret REDACTED)
 #     realistic-95       body 95 — the one measured live key length (ops #2874)
+# FLOOR: the canary's own vectors sit at and above these floors on purpose; anything below
+#   a floor is invisible to that gitleaks rule (covered by the digest watcher, ops #3995).
 #     floor-20           body 20 — proves the {20,} floor; a silent revert to
 #                        {90,} would still detect the 95 vector
 #   negatives (must scan clean, rc 0 exactly, and the positive assertion must FAIL)
